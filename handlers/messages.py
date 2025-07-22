@@ -357,6 +357,231 @@ async def handle_preferences(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 await update.message.reply_text("❌ Error updating modules. Please try again.")
             context.user_data.clear()
 
+async def handle_mood_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database):
+    """Handle mood tracking flow messages"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    mood_step = context.user_data.get('mood_step')
+    
+    if mood_step == 'rating':
+        if text in ['1', '2', '3', '4', '5']:
+            rating = int(text)
+            context.user_data['mood_rating'] = rating
+            context.user_data['mood_step'] = 'note'
+            
+            mood_emoji = ['😞', '😕', '😐', '😊', '😄'][rating - 1]
+            await update.message.reply_text(
+                f"You rated your day: {rating}/5 {mood_emoji}\n\n"
+                "Would you like to add a note about your day? (optional)\n"
+                "Type your note or 'skip' to finish:",
+                reply_markup=ReplyKeyboardMarkup([['skip']], one_time_keyboard=True, resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text(
+                "Please select a rating from 1-5:",
+                reply_markup=ReplyKeyboardMarkup([['1', '2', '3', '4', '5']], one_time_keyboard=True, resize_keyboard=True)
+            )
+    
+    elif mood_step == 'note':
+        rating = context.user_data.get('mood_rating')
+        note = None if text.lower() == 'skip' else text
+        
+        # Save mood entry
+        success = db.add_mood_entry(user_id, rating, note)
+        context.user_data.clear()
+        
+        if success:
+            mood_emoji = ['😞', '😕', '😐', '😊', '😄'][rating - 1]
+            response = f"Mood logged successfully! {mood_emoji}\n\n"
+            response += f"Rating: {rating}/5\n"
+            if note:
+                response += f"Note: {note}\n"
+            response += "\nKeep tracking your daily mood! Use /moodstats to see your progress. 📈"
+            await update.message.reply_text(response, reply_markup=ReplyKeyboardMarkup([['/moodstats']], one_time_keyboard=True, resize_keyboard=True))
+        else:
+            await update.message.reply_text("Sorry, there was an error saving your mood. Please try again.")
+
+async def handle_habit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database):
+    """Handle habit management flow messages"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    habit_step = context.user_data.get('habit_step')
+    
+    if habit_step == 'add_first':
+        if text.lower() == 'cancel':
+            context.user_data.clear()
+            await update.message.reply_text("Habit creation cancelled! ❌")
+            return
+        
+        # Add the first habit
+        success = db.add_habit(user_id, text)
+        context.user_data.clear()
+        
+        if success:
+            await update.message.reply_text(
+                f"Great! Your first habit '{text}' has been created! 🎯\n\n"
+                "You'll receive daily reminders at 21:30 to check off your habits.\n\n"
+                "Use /habits to manage your habits or add more!",
+                reply_markup=ReplyKeyboardMarkup([['/habits']], one_time_keyboard=True, resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text("Sorry, there was an error creating your habit. Please try again.")
+    
+    elif habit_step == 'manage':
+        if text == "➕ Add Habit":
+            await update.message.reply_text(
+                "What new habit would you like to track?\n"
+                "(e.g., 'Meditate 10 min', 'Call family', 'Stretch')\n\n"
+                "Type your habit name or 'cancel' to exit:",
+                reply_markup=ReplyKeyboardMarkup([['cancel']], one_time_keyboard=True, resize_keyboard=True)
+            )
+            context.user_data['habit_step'] = 'add_new'
+            
+        elif text == "🗑️ Delete Habit":
+            habits = db.get_user_habits(user_id)
+            if not habits:
+                await update.message.reply_text("You don't have any habits to delete!")
+                context.user_data.clear()
+                return
+            
+            # Show habits for deletion
+            keyboard = [[KeyboardButton(f"❌ {habit['habit_name']}") for habit in habits[:2]]]
+            if len(habits) > 2:
+                keyboard.extend([[KeyboardButton(f"❌ {habit['habit_name']}") for habit in habits[2:4]]])
+            if len(habits) > 4:
+                keyboard.extend([[KeyboardButton(f"❌ {habit['habit_name']}") for habit in habits[4:]]])
+            keyboard.append([KeyboardButton("🔙 Back")])
+            
+            await update.message.reply_text(
+                "Which habit would you like to delete?\n\n"
+                "⚠️ This will permanently delete the habit and all its history!",
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            )
+            context.user_data['habit_step'] = 'delete'
+            
+        elif text == "📊 Today's Progress":
+            await show_daily_habits(update, context, db, user_id)
+            context.user_data.clear()
+            
+        elif text == "❌ Cancel":
+            context.user_data.clear()
+            await update.message.reply_text("Habit management cancelled! 👍")
+    
+    elif habit_step == 'add_new':
+        if text.lower() == 'cancel':
+            context.user_data.clear()
+            await update.message.reply_text("Habit creation cancelled! ❌")
+            return
+        
+        success = db.add_habit(user_id, text)
+        context.user_data.clear()
+        
+        if success:
+            await update.message.reply_text(
+                f"Excellent! New habit '{text}' added! 🎯\n\n"
+                "Use /habits to manage all your habits.",
+                reply_markup=ReplyKeyboardMarkup([['/habits']], one_time_keyboard=True, resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text("Sorry, there was an error adding your habit. Please try again.")
+    
+    elif habit_step == 'delete':
+        if text == "🔙 Back":
+            # Go back to main habits menu
+            habits = db.get_user_habits(user_id)
+            habit_list = "\n".join([f"• {habit['habit_name']}" for habit in habits])
+            
+            keyboard = [
+                [KeyboardButton("➕ Add Habit"), KeyboardButton("🗑️ Delete Habit")],
+                [KeyboardButton("📊 Today's Progress"), KeyboardButton("❌ Cancel")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                f"🎯 **Your Habits:**\n\n{habit_list}\n\n"
+                "What would you like to do?",
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            context.user_data['habit_step'] = 'manage'
+            return
+        
+        # Find and delete the habit
+        if text.startswith("❌ "):
+            habit_name = text[2:]  # Remove "❌ " prefix
+            habits = db.get_user_habits(user_id)
+            habit_to_delete = next((h for h in habits if h['habit_name'] == habit_name), None)
+            
+            if habit_to_delete:
+                success = db.delete_habit(user_id, habit_to_delete['id'])
+                context.user_data.clear()
+                
+                if success:
+                    await update.message.reply_text(
+                        f"Habit '{habit_name}' has been deleted! 🗑️\n\n"
+                        "All associated history has been removed."
+                    )
+                else:
+                    await update.message.reply_text("Sorry, there was an error deleting the habit.")
+            else:
+                await update.message.reply_text("Habit not found. Please try again.")
+                context.user_data.clear()
+
+async def show_daily_habits(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, user_id: int):
+    """Show today's habit progress with inline buttons"""
+    from datetime import date
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    
+    today = date.today().isoformat()
+    habit_logs = db.get_habit_logs_for_date(user_id, today)
+    
+    if not habit_logs:
+        await update.message.reply_text(
+            "You don't have any habits to track yet! 🎯\n\n"
+            "Use /habits to create your first habit!"
+        )
+        return
+    
+    # Create inline keyboard for habit checking
+    keyboard = []
+    progress_text = "📊 **Today's Habit Progress**\n\n"
+    
+    completed_count = 0
+    for habit in habit_logs:
+        status = "✅" if habit['completed'] else "❌"
+        progress_text += f"{status} {habit['habit_name']}\n"
+        
+        if habit['completed']:
+            completed_count += 1
+            # Button to mark as incomplete
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"❌ {habit['habit_name']}", 
+                    callback_data=f"habit_toggle_{habit['habit_id']}_0"
+                )
+            ])
+        else:
+            # Button to mark as complete
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"✅ {habit['habit_name']}", 
+                    callback_data=f"habit_toggle_{habit['habit_id']}_1"
+                )
+            ])
+    
+    progress_text += f"\n📈 Progress: {completed_count}/{len(habit_logs)} habits completed"
+    
+    if completed_count == len(habit_logs):
+        progress_text += "\n\n🎉 All habits completed today! Great job! 🌟"
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        progress_text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database):
     """Handle all text messages"""
     # Check if user is in onboarding flow
@@ -365,6 +590,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check if user is in preferences flow
     elif context.user_data.get('preferences_mode'):
         await handle_preferences(update, context, db)
+    # Check if user is in mood tracking flow
+    elif context.user_data.get('mood_step'):
+        await handle_mood_flow(update, context, db)
+    # Check if user is in habit management flow
+    elif context.user_data.get('habit_step'):
+        await handle_habit_flow(update, context, db)
     else:
         # Handle other text messages here
         await update.message.reply_text(
